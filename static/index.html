@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vendor vs RFQ scorer</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c2330; --muted:#657084; --line:#dde1e8;
+          --good:#1b8a4b; --mid:#c78a00; --bad:#c23b3b; --accent:#2457d6; }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg);
+         color: var(--ink); margin: 0; padding: 24px; }
+  main { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 18px; }
+  label { display: block; font-weight: 600; margin: 0 0 6px; }
+  select, textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  textarea { min-height: 200px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+  button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--line); background: #fff; cursor: pointer; }
+  button:hover { background: #f0f2f6; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { background: #1b47b3; }
+  button:disabled { opacity: .55; cursor: wait; }
+  .rfqbox { background: #f2f4f8; border-radius: 6px; padding: 10px 12px; margin-top: 8px; font-size: 13px; }
+  .rfqbox b { font-weight: 600; }
+  .error { background: #fdecec; color: #8f2424; border: 1px solid #f3c2c2; border-radius: 6px; padding: 10px 12px; margin-top: 10px; }
+  .score { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .score .num { font-size: 44px; font-weight: 700; line-height: 1; }
+  .score .of { color: var(--muted); }
+  .good { color: var(--good); } .mid { color: var(--mid); } .bad { color: var(--bad); }
+  .cap { background: #fff6e0; border: 1px solid #f0d99a; border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 13px; }
+  ul { margin: 6px 0 14px; padding-left: 20px; }
+  li { margin-bottom: 4px; }
+  .cols h3 { font-size: 14px; margin: 12px 0 0; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .v { font-weight: 600; white-space: nowrap; }
+  .v.met { color: var(--good); } .v.partial { color: var(--mid); } .v.not_met { color: var(--bad); } .v.no_evidence { color: var(--muted); }
+  .hist-item { border-top: 1px solid var(--line); padding: 10px 0; }
+  .hist-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  .hist-score { font-weight: 700; font-size: 18px; min-width: 44px; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .warn { color: var(--muted); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Vendor vs RFQ scorer</h1>
+  <p class="sub">Pick an RFQ, paste or upload a vendor profile, and get an alignment score with reasons and gaps.</p>
+
+  <div class="card">
+    <label for="rfq">1. RFQ</label>
+    <select id="rfq"></select>
+    <div id="rfqbox" class="rfqbox"></div>
+
+    <div style="margin-top:16px">
+      <label for="profile">2. Vendor profile</label>
+      <textarea id="profile" placeholder="Paste the vendor profile here, or upload / load a sample below."></textarea>
+      <div class="row">
+        <input type="file" id="file" accept=".txt,text/plain">
+        <span class="meta">or load sample:</span>
+        <button type="button" data-sample="vendor-a.txt">Vendor A</button>
+        <button type="button" data-sample="vendor-b.txt">Vendor B</button>
+        <button type="button" data-sample="vendor-c.txt">Vendor C</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="go" class="primary">Evaluate</button>
+      <span id="status" class="meta"></span>
+    </div>
+    <div id="error" class="error" hidden></div>
+  </div>
+
+  <div id="result" class="card" hidden></div>
+
+  <div class="card">
+    <h2>Past evaluations</h2>
+    <div id="history"><span class="meta">Loading…</span></div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let rfqs = [];
+
+function el(tag, attrs = {}, ...children) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v; else n.setAttribute(k, v);
+  }
+  for (const c of children.flat()) n.append(c instanceof Node ? c : document.createTextNode(c ?? ""));
+  return n;
+}
+const scoreClass = (s) => (s >= 70 ? "good" : s >= 45 ? "mid" : "bad");
+const fmtTime = (iso) => new Date(iso).toLocaleString();
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  let body = null;
+  try { body = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error((body && body.detail) ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : `Request failed (${r.status})`);
+  return body;
+}
+
+function showRfq() {
+  const r = rfqs.find((x) => x.id === $("rfq").value);
+  const box = $("rfqbox");
+  box.replaceChildren();
+  if (!r) return;
+  const line = (label, val) => el("div", {}, el("b", {}, label + ": "), val);
+  box.append(
+    line("Category", r.category),
+    line("Quantity", r.quantity),
+    line("Delivery", r.delivery),
+    line("Mandatory", (r.mandatory || []).join("; ")),
+    line("Required", (r.required || []).join("; ")),
+    line("Preferred", (r.preferred || []).join("; "))
+  );
+}
+
+function renderBreakdown(b) {
+  const rows = b.criteria.map((c) =>
+    el("tr", {},
+      el("td", {}, c.group),
+      el("td", {}, c.text),
+      el("td", { class: "v " + c.verdict }, c.verdict.replace("_", " ")),
+      el("td", {}, c.evidence || "—"))
+  );
+  const groups = Object.entries(b.groups).map(([g, v]) => `${g}: ${v.points}/${v.weight} (${v.met}/${v.total} met)`).join(" · ");
+  const parts = [
+    el("details", {},
+      el("summary", {}, "How this score was calculated"),
+      el("div", { class: "meta", style: "margin-top:6px" }, `Weighted points → ${groups}. Raw ${b.raw_score}/100.`),
+      el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Group"), el("th", {}, "Criterion"), el("th", {}, "Verdict"), el("th", {}, "Evidence"))), el("tbody", {}, rows)))
+  ];
+  if (b.warnings && b.warnings.length) parts.push(el("div", { class: "warn" }, "Notes: " + b.warnings.join("; ")));
+  return parts;
+}
+
+function renderEval(e, container) {
+  container.replaceChildren(
+    el("div", { class: "score" },
+      el("span", { class: "num " + scoreClass(e.score) }, String(e.score)),
+      el("span", { class: "of" }, "/ 100"),
+      el("span", { class: "meta" }, `${e.vendor_name} vs ${e.rfq_id}`)),
+    ...(e.breakdown.cap_applied ? [el("div", { class: "cap" }, `Score capped at ${e.breakdown.cap}: ${e.breakdown.cap_reason}.`)] : []),
+    el("div", { class: "cols" },
+      el("h3", {}, "Why it aligns"), el("ul", {}, e.reasons.map((r) => el("li", {}, r))),
+      el("h3", {}, "Gaps"), el("ul", {}, e.gaps.map((g) => el("li", {}, g)))),
+    ...renderBreakdown(e.breakdown)
+  );
+}
+
+async function loadHistory() {
+  const box = $("history");
+  try {
+    const list = await api("/api/evaluations");
+    if (!list.length) { box.replaceChildren(el("span", { class: "meta" }, "No evaluations yet.")); return; }
+    box.replaceChildren(...list.map((e) => {
+      const body = el("div", {});
+      renderEval(e, body);
+      return el("div", { class: "hist-item" },
+        el("div", { class: "hist-head" },
+          el("span", { class: "hist-score " + scoreClass(e.score) }, String(e.score)),
+          el("b", {}, e.vendor_name),
+          el("span", { class: "meta" }, `${e.rfq_id} · ${e.rfq_title}`),
+          el("span", { class: "meta" }, fmtTime(e.created_at))),
+        el("details", {}, el("summary", {}, "Details"), body));
+    }));
+  } catch (err) {
+    box.replaceChildren(el("span", { class: "error" }, err.message));
+  }
+}
+
+async function evaluate() {
+  const err = $("error"); err.hidden = true;
+  const profile = $("profile").value.trim();
+  if (!profile) { err.textContent = "Paste or upload a vendor profile first."; err.hidden = false; return; }
+  $("go").disabled = true; $("status").textContent = "Evaluating… (usually 5-20 seconds)";
+  try {
+    const e = await api("/api/evaluate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rfq_id: $("rfq").value, profile_text: profile }),
+    });
+    const res = $("result"); res.hidden = false; renderEval(e, res);
+    res.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    await loadHistory();
+  } catch (ex) {
+    err.textContent = ex.message; err.hidden = false;
+  } finally {
+    $("go").disabled = false; $("status").textContent = "";
+  }
+}
+
+$("file").addEventListener("change", (ev) => {
+  const f = ev.target.files[0]; if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => { $("profile").value = rd.result; };
+  rd.readAsText(f);
+});
+document.querySelectorAll("[data-sample]").forEach((b) => b.addEventListener("click", async () => {
+  const r = await fetch("/samples/" + b.dataset.sample);
+  $("profile").value = await r.text();
+}));
+$("rfq").addEventListener("change", showRfq);
+$("go").addEventListener("click", evaluate);
+
+(async function init() {
+  try {
+    rfqs = await api("/api/rfqs");
+    $("rfq").replaceChildren(...rfqs.map((r) => el("option", { value: r.id }, `${r.id} — ${r.title}`)));
+    showRfq();
+  } catch (e) { $("error").textContent = e.message; $("error").hidden = false; }
+  loadHistory();
+})();
+</script>
+</body>
+</html>
